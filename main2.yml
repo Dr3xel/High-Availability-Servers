@@ -1,0 +1,99 @@
+- hosts: localhost
+  gather_facts: false
+  vars:
+    aws_access_key: "Your Access Key"
+    aws_secret_key: "Your Secret Key"
+    region: "eu-central-1"
+    zones:
+      - eu-central-1a
+      - eu-central-1b
+      - eu-central-1c
+
+  tasks:
+    - name: "Ensure boto execution"
+      pip:
+        name:
+          - boto3
+          - botocore
+        executable: pip3
+        state: present   
+   
+   
+    - name: Creating Security Group
+      amazon.aws.ec2_security_group:
+        aws_access_key: "{{ aws_access_key }}"
+        aws_secret_key: "{{ aws_secret_key }}"
+        name: "ansible-sg"
+        description: "Security Group for Project"
+        region: "{{ region }}"
+        rules:
+          - proto: tcp
+            from_port: 22
+            to_port: 22
+            cidr_ip: 0.0.0.0/0
+          - proto: tcp
+            from_port: 80
+            to_port: 80
+            cidr_ip: 0.0.0.0/0
+      register: security_group
+
+    - name: Create ELB
+      amazon.aws.elb_classic_lb:
+        name: ansible-elb
+        state: present
+        aws_access_key: "{{ aws_access_key }}"
+        aws_secret_key: "{{ aws_secret_key }}"
+        region: "{{ region }}"
+        zones: "{{ zones }}"
+        security_group_ids: "{{ security_group.group_id }}"
+        health_check:
+          ping_protocol: tcp 
+          ping_port: 80
+          response_timeout: 30
+          interval: 60
+          healthy_threshold: 5
+          unhealthy_threshold: 10
+          
+        listeners:
+          - protocol: HTTP
+            load_balancer_port: 80
+            instance_port: 80
+    
+    - community.aws.elb_classic_lb_info:
+        names: ansible-elb
+      register: elb_info
+
+    - ansible.builtin.debug:
+        msg: "http://{{ elb_info.elbs.0.dns_name }}"
+    
+    - name: Create Launch Configuration
+      community.aws.autoscaling_launch_config:
+        name: "launch-conf"
+        image_id: "ami-04e601abe3e1a910f"
+        assign_public_ip: true
+        instance_type: "t2.micro"
+        key_name: "Your Key"
+        security_groups: "{{ security_group.group_id }}"
+        user_data: |
+          #!/bin/bash
+          sudo apt update
+          sudo apt install -y nginx
+          systemctl start nginx
+          systemctl enable --now nginx
+      register: launch_conf
+
+    - name: Create AutoScaling Group
+      amazon.aws.autoscaling_group:
+        name: ansible-asg
+        state: present
+        aws_access_key: "{{ aws_access_key }}"
+        aws_secret_key: "{{ aws_secret_key }}"
+        load_balancers: ['ansible-elb']
+        availability_zones: "{{ zones }}"
+        launch_config_name: "{{ launch_conf.name }}"
+        min_size: 1
+        max_size: 2
+        desired_capacity: 2
+        tags:
+          - environment: test
+            propagate_at_launch: false
